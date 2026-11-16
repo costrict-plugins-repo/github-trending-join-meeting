@@ -1,0 +1,595 @@
+# AgentCall API Reference — Skill Quick Reference
+
+Complete event and command reference for agents using the AgentCall skill.
+
+## Authentication
+
+API keys are prefixed `ak_ac_` and passed as `Authorization: Bearer ak_ac_xxx`.
+
+To get an API key:
+```bash
+# 1. Register
+curl -X POST https://api.agentcall.dev/v1/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"email": "you@example.com", "password": "your-password"}'
+# Response: {"id": "usr-xxx", "email": "you@example.com"}
+
+# 2. Login (get JWT)
+curl -X POST https://api.agentcall.dev/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "you@example.com", "password": "your-password"}'
+# Response: {"token": "eyJ..."}
+
+# 3. Create API key (using JWT)
+curl -X POST https://api.agentcall.dev/v1/auth/api-keys \
+  -H "Authorization: Bearer eyJ..." \
+  -H "Content-Type: application/json" \
+  -d '{"name": "my-agent"}'
+# Response: {"key": "ak_ac_xxx...", "id": "key-xxx", "key_prefix": "ak_ac_xxxx", "name": "my-agent"}
+# Save the key — it is shown only once.
+
+# Check credit balance
+curl https://api.agentcall.dev/v1/auth/credits \
+  -H "Authorization: Bearer eyJ..."
+# Response: {"credits": 21600000000}
+```
+
+Set `AGENTCALL_API_KEY=ak_ac_xxx...` in your environment.
+
+---
+
+## REST Endpoints
+
+### POST /v1/calls — Create a Call
+
+```json
+{
+  "meet_url": "https://meet.google.com/abc-def-ghi",
+  "bot_name": "June",
+  "mode": "audio",
+  "voice_strategy": "collaborative",
+  "transcription": true,
+  "collaborative": {
+    "trigger_words": ["june", "juno", "hey june"],
+    "barge_in_prevention": true,
+    "interruption_use_full_text": true,
+    "context": "You are June. You help with financial data and code analysis.",
+    "voice": "voice.heart"
+  },
+  "webhook_url": "https://my-server.com/webhooks",
+  "event_filter": ["transcript.final", "participant.joined"],
+  "alone_timeout": 120000,
+  "silence_timeout": 300000,
+  "max_duration": 3600000,
+  "transcript_retention_hours": 24,
+  "disclosure": {
+    "enabled": true,
+    "message": "This meeting is being transcribed by June.",
+    "delay_seconds": 60
+  },
+  "webpage_url": "https://your-site.com/bot",
+  "screenshare_url": "https://your-site.com/screenshare"
+}
+```
+
+**Response (201):**
+```json
+{
+  "call_id": "call-550e8400-e29b-41d4-a716-446655440000",
+  "status": "bot_joining",
+  "ws_url": "wss://api.agentcall.dev/v1/calls/call-550e.../ws",
+  "tunnel_url": "https://x8f2k.conn.agentcall.dev/k/a7b2c.../ui",
+  "tunnel_id": "tun-a7b2c...",
+  "tunnel_access_key": "tak_...",
+  "call_token": "ct_...",
+  "created_at": "2026-03-25T10:00:00.000Z",
+  "bot_name": "June"
+}
+```
+- `bot_name` — the name the bot joins under. It can differ from the requested name when the meeting
+  platform doesn't support some characters (Microsoft Teams: letters, numbers, spaces and `- _ .`
+  only; Google Meet drops `'`). Then the response also has `bot_name_requested` (what you sent) and
+  `bot_name_note` (a short explanation). A name with no usable characters left is rejected (400).
+- `tunnel_id` + `tunnel_access_key` — for tunnel client auth (webpage modes only, NOT the API key)
+- `call_token` — call-scoped token for UI page WebSocket auth (`/v1/calls/{id}/ws/ui?call_token=ct_xxx`)
+- Optional request field `"reservation_id": "res_..."` — start on a reserved bot (fast start, see
+  [Reservations](#reservations)). 400 if the id isn't yours or the call's `mode` differs from the
+  reservation's. The bot always starts; the `call.reservation` event says whether a reserved bot was used.
+
+### GET /v1/calls — List Active Calls
+
+```json
+// Response (200):
+[
+  {
+    "call_id": "call-550e8400-e29b-41d4-a716-446655440000",
+    "status": "bot_ready",
+    "meet_url": "https://meet.google.com/abc-def-ghi",
+    "bot_name": "June",
+    "mode": "audio",
+    "voice_strategy": "collaborative",
+    "ws_url": "wss://api.agentcall.dev/v1/calls/call-550e.../ws",
+    "created_at": "2026-03-25T10:00:00.000Z"
+  }
+]
+```
+
+### GET /v1/calls/:id — Get Call Details
+
+```json
+// Response (200):
+{
+  "call_id": "call-550e8400...",
+  "status": "bot_ready",
+  "meet_url": "https://meet.google.com/abc-def-ghi",
+  "bot_name": "June",
+  "mode": "audio",
+  "voice_strategy": "collaborative",
+  "bot_id": "bot-abc123",
+  "ws_url": "wss://...",
+  "tunnel_url": "",
+  "created_at": "2026-03-25T10:00:00.000Z",
+  "ended_at": null,
+  "cost": null
+}
+```
+
+### DELETE /v1/calls/:id — End Call
+
+Bot leaves meeting. Cost calculated using plan-based rates and credits deducted.
+
+```json
+// Response (200):
+{"status": "ended"}
+
+// If already ended (409):
+{"error": "call already ended"}
+```
+
+### GET /v1/calls/:id/transcript — Get Transcript
+
+Query param: `format=json` (default) or `format=text`.
+Available during and after the call for `transcript_retention_hours`.
+
+```json
+// Response (200, format=json):
+{
+  "bot_id": "bot-abc123",
+  "entries": [
+    {"speaker": {"id": "p-1", "name": "Alice"}, "text": "Let's start.", "timestamp": "2026-03-25T10:01:00.000Z"},
+    {"speaker": {"id": "p-2", "name": "Bob"}, "text": "Good morning.", "timestamp": "2026-03-25T10:01:05.000Z"}
+  ],
+  "duration_minutes": 45,
+  "entry_count": 247
+}
+```
+
+### POST /v1/tts/generate — Standalone TTS
+
+```json
+// Request:
+{"text": "Hello world", "voice": "af_heart", "speed": 1.0, "format": "pcm_16khz"}
+
+// Response (200, streaming JSON lines):
+{"type": "audio.chunk", "data": "base64-pcm-data...", "chunk_index": 0, "is_last": false}
+{"type": "audio.chunk", "data": "base64-pcm-data...", "chunk_index": 1, "is_last": true}
+```
+
+### GET /v1/tts/voices — List TTS Voices
+
+```json
+// Response (200):
+{"voices": [
+  {"id": "af_heart", "name": "Heart", "language": "en-us", "gender": "female"},
+  {"id": "af_bella", "name": "Bella", "language": "en-us", "gender": "female"},
+  {"id": "am_adam", "name": "Adam", "language": "en-us", "gender": "male"},
+  {"id": "bf_emma", "name": "Emma", "language": "en-gb", "gender": "female"}
+]}
+```
+
+---
+
+## Reservations
+
+A bot normally joins a meeting in under a minute; during busy times it can need a minute or two
+longer while a new machine starts. Pro and Enterprise users can reserve bots ahead of a meeting: a
+reserved bot skips that wait — its machine is already running.
+
+A reservation holds up to **4 bots of one mode** for a fixed **15-minute window**, starting
+**5 minutes to 7 days** from now. All endpoints take `Authorization: Bearer <api key>`. The skill's
+`reserve.py` / `reserve.js` scripts wrap them (see [Reservations Guide](guides/reservations.md)).
+
+| Endpoint | Description |
+|----------|-------------|
+| `POST /v1/reservations` | Book. Body `{"mode": "audio"\|"webpage-audio"\|"webpage-av"\|"webpage-av-screenshare", "count": 1-4, "start_at": "<ISO 8601 UTC>"}` → 201 reservation |
+| `GET /v1/reservations` | Your reservations (array, newest first: upcoming + recent) |
+| `GET /v1/reservations/{id}` | One reservation, live: includes `ready` while active |
+| `DELETE /v1/reservations/{id}` | Cancel → the reservation, now `cancelled`. Free until 5 minutes before `start_at`; after that the unused reserved time is charged as if held to the end |
+
+**Reservation object:**
+```json
+{
+  "reservation_id": "res_...",
+  "mode": "audio",
+  "count": 2,
+  "start_at": "2026-11-10T15:00:00Z",
+  "end_at": "2026-11-10T15:15:00Z",
+  "usable_from": "2026-11-10T14:55:00Z",
+  "status": "scheduled",
+  "claimed": 0,
+  "calls": [],
+  "ready": 2,
+  "charged_microcents": null,
+  "created_at": "2026-11-09T12:00:00Z",
+  "cancelled_at": null
+}
+```
+- `status` — `scheduled` / `active` / `ended` / `cancelled`
+- `usable_from` — `start_at` − 5 min; slots can be used from then until `end_at`
+- `claimed` — reserved bots used so far; `calls` — the call ids that used one
+- `ready` — reserved bots ready right now (single GET, while active only)
+- `charged_microcents` — `null` until settled after the window (1,000,000 microcents = $1)
+
+**Booking errors:**
+
+| HTTP | Meaning |
+|------|---------|
+| 400 | Invalid field (mode, count, or `start_at` not 5 min – 7 days ahead) |
+| 402 | Credits don't cover the worst case: every bot unused for the full 15 minutes at your rate for that mode |
+| 403 | Plan is not Pro or Enterprise |
+| 409 | No reservable capacity at that time — try another time or fewer bots |
+| 429 | Your limit: max 4 reservations overlapping in time, max 100 not yet ended |
+| 503 | Reservations temporarily unavailable |
+
+**Using it:** pass `"reservation_id"` in `POST /v1/calls` (bridges / join scripts:
+`--reservation-id res_...`). The call's `mode` must match. The bot **always** starts; the agent
+receives `{"event": "call.reservation", "call_id", "reservation_id", "result"}`:
+
+| `result` | Meaning |
+|----------|---------|
+| `claimed` | A reserved bot was used — fast start |
+| `not_ready` | More than 5 minutes before `start_at` — normal start |
+| `exhausted` | All reserved bots of this reservation already used — normal start |
+| `expired` | Window over or reservation cancelled — normal start |
+| `unavailable` | Reserved bot not available — normal start |
+
+**Rules:**
+- Each reserved bot slot is single-use: a bot leaving doesn't return it (to run 3 bots one after
+  another, reserve 3).
+- A bot that took a slot runs normally past the window (normal call billing).
+- Bots beyond the count, or without the id, start the normal way.
+
+**Billing:** normal call minutes as always, plus unused reserved time at your normal per-minute rate
+for that mode: slot taken before `start_at` = nothing extra; taken later = from `start_at` until taken
+(rounded up to whole minutes); never taken = the full 15 minutes. Charged after the window ends. See
+and cancel reservations in the dashboard (app.agentcall.dev → Reservations) or via the API.
+
+---
+
+## WebSocket Connection
+
+```
+wss://api.agentcall.dev/v1/calls/{call_id}/ws?api_key=ak_ac_xxx
+```
+
+On connect, receives `call.state` snapshot with current status.
+
+---
+
+## Events Reference (Agent Receives)
+
+### Lifecycle Events
+
+| Event | When | Fields |
+|-------|------|--------|
+| `call.created` | Call registered | `call_id` |
+| `call.tunnel_ready` | Tunnel client connected (webpage modes) | `call_id` |
+| `call.bot_joining` | Bot entering meeting | `call_id` |
+| `call.bot_joining_meeting` | Bot actively joining (sub-steps) | `call_id`, `detail`: `starting`/`joining`/`initializing` |
+| `call.bot_waiting_room` | Bot in waiting room | `call_id` |
+| `call.bot_ready` | Bot active in meeting | `call_id` |
+| `call.reservation` | Call created with `reservation_id` | `call_id`, `reservation_id`, `result`: `claimed` (fast start) / `not_ready` / `exhausted` / `expired` / `unavailable` (normal start) |
+| `call.ended` | Call finished | `call_id`, `reason`, `duration_minutes`, `cost`, `transcript_url`, `participants_summary` |
+| `call.state` | State snapshot (on WS connect/reconnect) | `call_id`, `status`, `mode`, `bot_name`, `voice_strategy`, `created_at`; collaborative calls also `voice` (`starting`/`connected`/`reconnecting`/`unavailable`) |
+| `call.transcript_ready` | Transcript available for download | `call_id`, `entries`, `transcript_url`, `expires_at` |
+| `call.credits_low` | Credits approaching zero | `call_id` |
+| `call.degraded` | Internal connection lost | `reason`: `voice_disconnected` |
+| `call.recovered` | Internal connection restored | `reason`: `voice_reconnected` |
+
+### Transcription Events
+
+| Event | Strategies | Fields |
+|-------|-----------|--------|
+| `transcript.final` | all | `text`, `speaker.name`, `speaker.id`, `timestamp` |
+| `transcript.partial` | direct | `text`, `speaker.name`, `timestamp` |
+
+### Meeting Events
+
+| Event | Fields |
+|-------|--------|
+| `participant.joined` | `participant.id`, `participant.name`, `participants[]` |
+| `participant.left` | `participant.id`, `participant.name`, `participants[]` |
+| `active_speaker` | `speaker.id`, `speaker.name` (`null` when nobody speaking) |
+| `chat.message` | `sender`, `message`, `message_id`, `timestamp` |
+
+### Voice Events (collaborative only)
+
+| Event | Fields |
+|-------|--------|
+| `voice.state` | `state`: one of 7 values (see below) |
+| `voice.text` | `text`: sentence the bot is speaking |
+
+**voice.state values:**
+- `listening` — idle, waiting to be addressed
+- `actively_listening` — detected name, processing incoming speech
+- `thinking` — preparing a response
+- `waiting_to_speak` — response ready, waiting for silence
+- `speaking` — outputting audio
+- `interrupted` — stopped mid-speech, evaluating
+- `contextually_aware` — follow-up window (20s after speaking)
+
+### TTS Events
+
+| Event | Fields | When |
+|-------|--------|------|
+| `tts.started` | `destination` | TTS generation began |
+| `tts.done` | `destination` | Audio finished playing |
+| `tts.error` | `reason` | `tts_unavailable` or `tts_interrupted` |
+| `tts.webpage_audio` | `data` (base64 PCM 24kHz), `sentence_index`, `sentence_text`, `duration_ms` | Audio chunk for webpage to play (webpage modes only). `sentence_index`, `sentence_text`, and `duration_ms` are optional fields, present when sent via `tts.speak`. |
+| `tts.interrupted` | `sentence_index`, `elapsed_ms`, `reason` | Sent by webpage when interruption detected |
+| `tts.audio_clear` | (none) | Stop all audio playback immediately (interruption in webpage modes) |
+
+**`tts.webpage_audio`** — In webpage modes, audio from GetSun (collaborative voice intelligence)/AgentCall TTS arrives as base64 PCM chunks. Your webpage must decode and play them. Use `AgentCallAudio` for automatic queuing.
+
+**`tts.audio_clear`** — When the bot is interrupted mid-speech, this event tells the webpage to flush its audio queue and stop playback immediately. Without handling this, the bot talks over the person who interrupted it.
+
+See [Webpage Audio Guide](guides/webpage-audio.md) for details, examples, and the `AgentCallAudio` player.
+
+### Media Events
+
+| Event | Fields |
+|-------|--------|
+| `audio.chunk` | `data` (base64 PCM 16kHz), mode 1 + `audio_streaming` only |
+| `screenshot.result` | `data` (base64 JPEG), `width`, `height`, `request_id` |
+| `meeting.mic.result` | `muted` (mic state afterwards), `noop` (already in that state), `warning`, `label`, `request_id` — reply to `meeting.mic` |
+| `capture.started` | `interval_ms` |
+| `capture.frame` | `data` (base64 JPEG), `frame_number` |
+| `capture.stopped` | `total_frames` |
+| `screenshare.started` | `url` |
+| `screenshare.stopped` | |
+| `screenshare.error` | `message` |
+
+### System Events
+
+| Event | Fields |
+|-------|--------|
+| `command.ack` | `command`, `request_id` |
+| `command.error` | `message`, `command`, `reason`, `request_id` |
+| `events.replay` | `count`, `events[]` | Response to events.replay command with buffered events |
+
+---
+
+## Commands Reference (Agent Sends)
+
+### Voice Intelligence (collaborative only)
+
+Every voice command gets a reply: `command.ack` once it reached voice intelligence, or
+`command.error` with a `reason` when it could not be delivered — `not_collaborative` (the call is
+direct; use `tts.speak`), `voice_not_ready` (still starting; retry after `call.bot_ready`) or
+`voice_unavailable` (voice intelligence is down; use `send_chat` meanwhile and retry after `call.recovered`,
+or rejoin with voice strategy `direct`).
+Add a `request_id` to match replies to commands.
+
+| Command | Fields | Description |
+|---------|--------|-------------|
+| `inject.natural` | `text`, `priority` (`normal`/`high`) | GetSun (collaborative voice intelligence) rephrases and speaks naturally |
+| `inject.verbatim` | `text`, `priority` | GetSun (collaborative voice intelligence) speaks exact text |
+| `trigger.speak` | `text`, `speaker` | Force response (always responds) |
+| `voice.contribute` | (none) | GetSun (collaborative voice intelligence) contributes based on recent transcript |
+| `voice.context_update` | `text` (max 4000 chars) | Replace GetSun (collaborative voice intelligence)'s context scratchpad |
+
+**Context vs Conversation:**
+- **Context** = your swappable knowledge layer (replaced each time)
+- **Conversation** = everything said in the session (automatic, never cleared)
+- GetSun (collaborative voice intelligence) remembers the conversation even after you swap context
+
+### Realtime (realtime strategy)
+
+`"voice_strategy": "realtime"` gives the bot its own voice that answers by itself; optional
+`"realtime": {"trigger_words": [...], "context": "...", "audience": "auto|one-on-one|team",
+"voice": "female.breezy", "search": true, "languages": ["Malayalam", "English"]}`. `languages`: the
+only languages the bot may speak, the first is its default (at most 5 names; letters, spaces and
+hyphens; otherwise 400); omitted = any. `vad_confirm_ms` (default 250, range 0–1000, 0 = off) and
+`vad_min_loud_frames` (default 6): a new sound counts as speech — and stops the bot — only when at least
+`vad_min_loud_frames` of its 20 ms frames within the first `vad_confirm_ms` are loud. The bridges send
+500 ms and set the frames from `--interruption-loudness` (0–100 %, default 55 → 14 frames). Voices: `female.breezy` (default, best performance), `female.firm`,
+`female.bright`, `male.upbeat`, `male.firm`, `male.calm`. `context` is at most 10,000 characters
+(longer → 400; `voice.context_update` longer than that → `command.error` reason `context_too_long`, nothing
+changed). Transcription is done by the realtime voice (`transcription` is ignored and not billed).
+
+| Event / command | Fields | Description |
+|-----------------|--------|-------------|
+| `agent.request` (event) | `request_id`, `question`, `transcript[]` | The bot needs the agent; transcript = lines since the previous request |
+| `agent.leave_request` (event) | `request_id`, `reason` | The bot said goodbye; send `meeting.leave` if the agent agrees |
+| `inject.natural` | `text`, `request_id`, `final` (default `true`), `silent` | Answer a request (`final: false` = status update; `silent: true` = keep until asked); without `request_id`: tell the meeting now |
+| `voice.context_update`, `tasks.set` | as above | Replace the bot's context / your task list |
+
+Use only these voice commands in realtime. The bridges refuse `tts.speak`, `inject.verbatim`,
+`trigger.speak` and `voice.contribute` in realtime (`command.error`; `tts.error` for `tts.speak`).
+
+Each command gets `command.ack` or `command.error` with a `reason`. Full guide:
+[Realtime Mode Guide](guides/realtime-mode.md).
+
+### TTS (direct mode)
+
+| Command | Fields | Description |
+|---------|--------|-------------|
+| `tts.generate` | `text`, `voice`, `speed`, `destination` | Unified TTS — routes audio based on destination |
+| `tts.speak` | `text`, `voice`, `speed` | Shortcut for `tts.generate` with `destination: "meeting"` |
+
+**Destinations:**
+- `"meeting"` — resample 24→16kHz, rechunk 20ms, inject into call (bot speaks in meeting)
+- `"agent"` (default) — return raw 24kHz PCM chunks via `tts.audio` events
+- `"webpage"` — send raw 24kHz to tunnel for browser playback
+
+**Best practice:** Send text sentence by sentence for lowest latency (<1s to first audio):
+```json
+{"type": "tts.generate", "text": "First sentence.", "voice": "af_heart", "destination": "meeting"}
+{"type": "tts.generate", "text": "Second sentence.", "voice": "af_heart", "destination": "meeting"}
+```
+
+**TTS Events received:**
+- `tts.started` — generation began (includes `destination`)
+- `tts.audio` — audio chunk (only for `destination: "agent"`, includes `data`, `chunk_index`, `is_last`, `duration_ms`)
+- `tts.webpage_audio` — audio sent to webpage (only for `destination: "webpage"`)
+- `tts.done` — generation complete (includes `destination`)
+- `tts.error` — failure (includes `reason`)
+
+**Available voices:** 54 voices across 9 languages. Default: `af_heart`.
+Use `GET /v1/tts/voices` for the full list.
+
+### Raw Audio (direct mode)
+
+| Command | Fields | Description |
+|---------|--------|-------------|
+| `audio.inject` | `data` (base64 PCM 16kHz 16-bit mono) | Inject raw audio into meeting — audio mode only; send paced (~real time), see [Bring Your Own Voice](guides/bring-your-own-voice.md) |
+| `audio.clear` | (none) | Stop current audio playback |
+
+### Meeting Actions (all modes)
+
+| Command | Fields | Description |
+|---------|--------|-------------|
+| `meeting.send_chat` | `message` | Send chat message (any language; send JSON as UTF-8 — `\uXXXX` escapes always work) |
+| `meeting.raise_hand` | (none) | Raise bot's hand |
+| `meeting.mic` | `action` (`on` / `off` / `toggle`), `request_id` (optional) | Unmute / mute / toggle the bot's mic. Replies with `meeting.mic.result` |
+| `meeting.leave` | (none) | Leave meeting gracefully |
+
+### Screenshots & Capture (all modes)
+
+| Command | Fields | Description |
+|---------|--------|-------------|
+| `screenshot.take` | `request_id` | Take single screenshot |
+| `capture.start` | `interval_ms` (min 500, multiple of 250) | Start periodic capture |
+| `capture.stop` | (none) | Stop periodic capture |
+
+### Screenshare (webpage-av-screenshare only)
+
+| Command | Fields | Description |
+|---------|--------|-------------|
+| `screenshare.start` | `url` | Start screensharing a URL |
+| `screenshare.stop` | (none) | Stop screensharing |
+
+### System Commands
+
+| Command | Description |
+|---------|-------------|
+| `events.replay` | Request replay of missed events (crash recovery). Returns last 200 events or 5 minutes. |
+
+---
+
+## Call Lifecycle
+
+```
+call.created
+    │
+    ▼
+call.tunnel_ready      (webpage modes only — tunnel client connected)
+    │
+    ▼
+call.bot_joining       (FirstCall (meeting infrastructure) bot entering meeting)
+    │
+    ▼
+call.bot_joining_meeting (detail: starting → joining → initializing)
+    │
+    ▼
+call.bot_waiting_room  (if meeting has waiting room)
+    │
+    ▼
+call.bot_ready         (bot is in the meeting, events flowing)
+    │
+    ▼
+call.ended             (reason + duration + cost + transcript_url)
+    │
+    ▼
+call.transcript_ready  (if transcription was enabled)
+```
+
+## End Reasons
+
+| Reason | Description |
+|--------|-------------|
+| `left` | Agent called DELETE or meeting.leave |
+| `ended` | Meeting ended on its own |
+| `rejected` | Host rejected the bot |
+| `blocked` | Bot was kicked |
+| `error` | Internal error |
+| `max_duration` | Hit the max_duration limit |
+| `timeout_silence` | No audio for silence_timeout |
+| `timeout_alone` | Bot alone for alone_timeout |
+
+---
+
+## Mode & Strategy Restrictions
+
+Voice commands sent to a call that can't run them return `command.error` with a `reason` (see
+Voice Intelligence above); meeting commands sent before the bot is connected return
+`command.error` with `reason: "bot_not_connected"`. Other mismatches are ignored:
+
+| Command | Requires |
+|---------|----------|
+| `inject.verbatim`, `inject.natural`, `trigger.speak`, `voice.contribute`, `voice.context_update` | collaborative strategy (realtime: only `inject.natural` and `voice.context_update`) |
+| `tts.speak`, `tts.generate` | any strategy (AgentCall TTS) |
+| `audio.inject` | audio mode, direct strategy |
+| `screenshare.start`, `screenshare.stop` | webpage-av-screenshare mode |
+| `audio.chunk` events | audio mode + `audio_streaming: true` |
+| `transcript.partial` events | direct strategy |
+
+---
+
+## Error Codes
+
+| HTTP | Meaning |
+|------|---------|
+| 400 | Bad request (validation error) |
+| 401 | Missing or invalid API key |
+| 402 | Insufficient credits |
+| 403 | Plan doesn't include the feature (reservations: Pro / Enterprise) |
+| 404 | Call not found |
+| 409 | Conflict (call already ended; no reservable capacity) |
+| 429 | Rate limit, concurrent call limit, or reservation limit |
+| 501 | Feature not yet implemented |
+| 503 | Service unavailable (TTS down) |
+
+---
+
+## Rate Limits
+
+| Resource | Limit |
+|----------|-------|
+| API requests | 100/second per API key |
+| WebSocket commands | 100/second per connection |
+| Register | 5/IP/hour |
+| Login | 10/IP/minute |
+
+## Billing
+
+| Component | Free | Pro | Enterprise |
+|-----------|------|-----|------------|
+| Base (meeting bot) | $0.35/hr | $0.30/hr | $0.25/hr |
+| Transcription | $0.12/hr | $0.10/hr | $0.08/hr |
+| Voice intelligence (GetSun (collaborative voice intelligence)) | $1.00/hr | $0.80/hr | $0.50/hr |
+| TTS generation (AgentCall TTS) | $8.00/hr | $6.00/hr | $5.00/hr |
+
+Base plan: 6 hours, 1 concurrent call, all features.
+
+---
+
+## Guides
+
+- [Collaborative Mode Guide](guides/collaborative-mode.md) — context system, inject patterns, background tasks, full examples
+- [Realtime Mode Guide](guides/realtime-mode.md) — the bot answers by itself and asks the agent with agent.request
+- [Webpage Audio Guide](guides/webpage-audio.md) — audio queue, interruption handling, AgentCallAudio player, custom audio effects
+- [Interruption Handling Guide](guides/interruption-handling.md) — VAD, sentence tracking, resume patterns
+- [UI Templates Guide](guides/ui-templates.md) — all templates, voice states, mic setup, building custom pages
+- [Crash Recovery Guide](guides/crash-recovery.md) — event replay, deduplication, full recovery example
+- [Reservations Guide](guides/reservations.md) — reserve bots ahead for a fast join (Pro / Enterprise)
